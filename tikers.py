@@ -1,60 +1,100 @@
 import requests
-from datetime import datetime
 
-def get_futures_tickers(instrument, start_date, end_date):
+def get_index_composition(index_code):
     """
-    Получение списка всех тикеров фьючерсов Московской биржи по инструменту
-    за указанный период (start_date, end_date) через API ISS.
-    
-    instrument -- базовое имя инструмента, например "RGBI"
-    start_date, end_date -- строки формата "YYYY-MM-DD"
+    Получаем состав индекса по коду (secid индекса) из API Мосбиржи.
+    Возвращает список secid входящих ценных бумаг.
+    Если индекс не найден или состав пуст, возвращает пустой список.
     """
-    base_url = "https://iss.moex.com/iss/engines/futures/markets/forts/boards/RFUD/securities.json"
-    
-    tickers = []
-    
-    # API возвращает текущие доступные тикеры, для истории надо проверить архив
-    # ISS не предоставляет прямой фильтр по дате тикеров, поэтому делаем обход:
-    # - Получаем весь список Securities за board RFUD (фьючерсы)
-    # - Фильтруем вручную по названию и дате (по подписи даты исполнения в тикере)
-    
-    resp = requests.get(base_url)
-    resp.raise_for_status()
-    data = resp.json()
-    
-    securities = data['securities']['data']
-    columns = data['securities']['columns']
-    
-    # Найдем индексы нужных полей в таблице
-    secid_idx = columns.index('SECID')
-    
-    # В тикерах фьючерсов есть в названии признак даты исполнения, например RGBI3.25, RGBI-3.25 или RGBI12.23
-    # Попробуем извлечь тикеры, начинающиеся на instrument
-    for sec in securities:
-        secid = sec[secid_idx]
-        if secid.startswith(instrument):
-            # Пример форматов: RGBI3.25, RGBI-3.25, RGBI12.23
-            # Извлечем части для оценки даты, возьмем последние 3-4 символа для года и месяца квартала
-            # Для точного отбора понадобится сопоставить с датами по контракту, но базово отфильтруем по диапазону дат исполнения
-            # Для демонстрации оставим все, соответствующие инструменту
-            
-            tickers.append(secid)
-    
-    # Уникализируем и отсортируем список
-    tickers = sorted(list(set(tickers)))
-    
-    return tickers
+    url = f"https://iss.moex.com/iss/engines/stock/markets/index/indices/{index_code}/composition.json"
+    try:
+        resp = requests.get(url)
+        resp.raise_for_status()
+        data = resp.json()
+        composition_data = data.get('composition', {}).get('data', [])
+        composition_columns = data.get('composition', {}).get('columns', [])
+        if not composition_data or not composition_columns:
+            return []
+
+        secid_idx = composition_columns.index('SECID')
+        instruments = [row[secid_idx] for row in composition_data]
+        return instruments
+    except Exception as e:
+        print(f"Ошибка при получении состава индекса {index_code}: {e}")
+        return []
+
+def get_futures_tickers_by_instrument(instrument):
+    """
+    Получаем список всех тикеров фьючерсов Московской биржи, начинающихся на instrument.
+    Используется API ISS по доске RFUD (фьючерсы).
+
+    Возвращает список уникальных тикеров.
+    """
+    url = "https://iss.moex.com/iss/engines/futures/markets/forts/boards/RFUD/securities.json"
+    try:
+        resp = requests.get(url)
+        resp.raise_for_status()
+        data = resp.json()
+
+        securities_data = data.get('securities', {}).get('data', [])
+        securities_columns = data.get('securities', {}).get('columns', [])
+
+        if not securities_data or not securities_columns:
+            return []
+
+        secid_idx = securities_columns.index('SECID')
+        tickers = []
+
+        for row in securities_data:
+            secid = row[secid_idx]
+            # Для надёжного совпадения фильтруем по началу secid
+            # Добавляем условие, что секюрид должен начинаться с instrument (без учета регистра — данные в верхнем)
+            if secid.upper().startswith(instrument.upper()):
+                tickers.append(secid)
+
+        return sorted(set(tickers))
+    except Exception as e:
+        print(f"Ошибка при получении фьючерсов по инструменту {instrument}: {e}")
+        return []
+
+def main():
+    print("Программа для получения фьючерсных тикеров по инструменту или индексу с Московской биржи")
+    base_input = input("Введите базовое имя инструмента или код индекса (например RGBI, IMOEX): ").strip().upper()
+
+    # Сначала пытаемся получить состав индекса
+    components = get_index_composition(base_input)
+    all_tickers = []
+
+    if components:
+        print(f"Найден состав индекса {base_input}, количество входящих инструментов: {len(components)}")
+        # Добавим фьючерсы самого индекса (если есть)
+        index_fut_tickers = get_futures_tickers_by_instrument(base_input)
+        if index_fut_tickers:
+            print(f"Фьючерсы по самому индексу {base_input}: {', '.join(index_fut_tickers)}")
+            all_tickers.extend(index_fut_tickers)
+        else:
+            print(f"Фьючерсы по самому индексу {base_input} не найдены.")
+
+        # Далее для каждого инструмента из состава загружаем фьючерсы
+        for instr in components:
+            fut_tickers = get_futures_tickers_by_instrument(instr)
+            if fut_tickers:
+                print(f"Фьючерсы по {instr}: {', '.join(fut_tickers)}")
+                all_tickers.extend(fut_tickers)
+            else:
+                print(f"Фьючерсы по {instr} не найдены.")
+    else:
+        # Если состав не найден — предполагаем обычный инструмент
+        print(f"Состав индекса не найден или пуст, ищем фьючерсы по инструменту {base_input}")
+        all_tickers = get_futures_tickers_by_instrument(base_input)
+
+    all_tickers = sorted(set(all_tickers))
+
+    print("\n\nОбщий список всех найденных фьючерсных тикеров:")
+    if all_tickers:
+        print(", ".join(all_tickers))
+    else:
+        print("Фьючерсные тикеры не найдены.")
 
 if __name__ == "__main__":
-    # Пример: пользователь задает инструмент и период
-    instrument = input("Введите базовое имя инструмента (например RGBI): ").strip().upper()
-    start_date = input("Введите дату начала периода в формате ГГГГ-ММ-ДД (например 2015-01-01): ").strip()
-    end_date = input("Введите дату окончания периода в формате ГГГГ-ММ-ДД (например 2025-08-10): ").strip()
-
-    # Программа пока не фильтрует по точной дате исполнения контрактов,
-    # так как для этого нужно отдельно получать даты истечения контрактов.
-    # Для более продвинутого парсинга можно дополнять запросы.
-    
-    tickers = get_futures_tickers(instrument, start_date, end_date)
-    print("Список фьючерсных тикеров по инструменту", instrument, "за период", start_date, "—", end_date, ":")
-    print(", ".join(tickers))
+    main()
